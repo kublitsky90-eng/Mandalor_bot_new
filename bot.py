@@ -64,45 +64,113 @@ class GuildBot:
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
+                'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
                 'Accept-Encoding': 'gzip, deflate, br',
                 'DNT': '1',
                 'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
+                'Upgrade-Insecure-Requests': '1',
+                'Cache-Control': 'max-age=0'
             }
             
             response = requests.get(GUILD_URL, headers=headers, timeout=15)
             response.raise_for_status()
             
+            # Сохраняем HTML для отладки
+            with open('debug_page.html', 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            print("Страница сохранена в debug_page.html для отладки")
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             players = []
             
-            # Ищем таблицу гильдии
-            guild_table = soup.find('table', {'class': re.compile(r'guild-members-table|table')})
+            # Ищем все ссылки на профили игроков
+            # На swgoh.gg ссылки на игроков выглядят как /p/игрок/
+            player_links = soup.find_all('a', href=re.compile(r'^/p/'))
             
-            if guild_table:
-                rows = guild_table.find_all('tr')
-                print(f"Найдено строк в таблице: {len(rows)}")
+            if player_links:
+                print(f"Найдено ссылок на игроков: {len(player_links)}")
+                for link in player_links:
+                    # Извлекаем имя из текста ссылки
+                    name = link.text.strip()
+                    if name and len(name) > 1 and name not in players:
+                        players.append(name)
+                        print(f"Найден игрок: {name}")
+            else:
+                # Альтернативный метод: ищем в таблице
+                print("Ссылки на игроков не найдены, ищем в таблице...")
                 
-                for row in rows:
-                    if row.find('th'):
-                        continue
-                    cols = row.find_all('td')
-                    if cols and len(cols) >= 1:
-                        name_cell = cols[0]
-                        name_link = name_cell.find('a')
-                        if name_link:
-                            name = name_link.text.strip()
-                            if name and len(name) > 1 and name not in players:
-                                players.append(name)
-                                print(f"Найден игрок: {name}")
+                # Ищем любую таблицу
+                tables = soup.find_all('table')
+                print(f"Найдено таблиц: {len(tables)}")
+                
+                for table_idx, table in enumerate(tables):
+                    rows = table.find_all('tr')
+                    print(f"Таблица {table_idx}: {len(rows)} строк")
+                    
+                    for row in rows:
+                        # Пропускаем заголовки
+                        if row.find('th'):
+                            continue
+                        
+                        # Ищем ячейки
+                        cells = row.find_all('td')
+                        if cells:
+                            for cell in cells:
+                                # Ищем ссылку в ячейке
+                                link = cell.find('a')
+                                if link and link.get('href', '').startswith('/p/'):
+                                    name = link.text.strip()
+                                    if name and len(name) > 1 and name not in players:
+                                        players.append(name)
+                                        print(f"Найден игрок в таблице: {name}")
+                                elif cell.text.strip() and len(cell.text.strip()) > 3:
+                                    # Возможно, имя просто в тексте
+                                    potential_name = cell.text.strip()
+                                    # Проверяем, не похоже ли на имя (не содержит цифр и не слишком длинное)
+                                    if not re.search(r'\d', potential_name) and len(potential_name) < 30 and len(potential_name) > 2:
+                                        if potential_name not in players:
+                                            players.append(potential_name)
+                                            print(f"Найден возможный игрок: {potential_name}")
             
-            print(f"Всего найдено игроков: {len(players)}")
+            # Если игроки не найдены, пробуем найти через JavaScript (но это сложнее)
+            if not players:
+                print("Пробуем найти игроков через JSON данные...")
+                # Ищем скрипты с данными
+                scripts = soup.find_all('script')
+                for script in scripts:
+                    if script.string and 'players' in script.string:
+                        # Ищем JSON с данными игроков
+                        json_match = re.search(r'{"players":\[.*?\]}', script.string)
+                        if json_match:
+                            try:
+                                import json as json_lib
+                                data = json_lib.loads(json_match.group())
+                                if 'players' in data:
+                                    for player in data['players']:
+                                        if 'name' in player:
+                                            players.append(player['name'])
+                                            print(f"Найден игрок в JSON: {player['name']}")
+                            except:
+                                pass
+            
+            # Удаляем дубликаты и сортируем
+            players = list(dict.fromkeys(players))
+            print(f"Всего найдено уникальных игроков: {len(players)}")
+            
+            # Если все еще нет игроков, используем тестовый список
+            if not players:
+                print("⚠️ Игроки не найдены на сайте, используем текущий список из базы данных")
+                # Возвращаем текущих игроков из self.players, чтобы не потерять данные
+                players = list(self.players.keys())
+                print(f"Загружено из базы: {len(players)} игроков")
+            
             return players
             
         except Exception as e:
-            print(f"Ошибка при прямом парсинге: {e}")
-            return []
+            print(f"Ошибка при парсинге: {e}")
+            import traceback
+            traceback.print_exc()
+            return list(self.players.keys())  # Возвращаем текущий список
     
     def initialize_from_website(self):
         """Инициализирует список игроков с сайта"""
