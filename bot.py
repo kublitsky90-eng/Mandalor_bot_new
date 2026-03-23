@@ -1,5 +1,6 @@
 import telebot
 from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from telebot.apihelper import ApiTelegramException
 import json
 import os
 import requests
@@ -207,6 +208,43 @@ class GuildBot:
         except Exception as e:
             print(f"Ошибка форматирования списка: {e}")
             return "🛡 Ошибка при формировании списка. Таков путь."
+    
+    def update_list_message(self, bot_instance, message: Message, force_new: bool = False) -> bool:
+        """Обновляет сообщение со списком, если нужно"""
+        try:
+            list_text = self.format_player_list()
+            markup = None
+            if message and can_change_roles(message):
+                markup = InlineKeyboardMarkup()
+                markup.row(
+                    InlineKeyboardButton("🔄 Обновить с сайта", callback_data="update_from_site"),
+                    InlineKeyboardButton("📝 Сохранить этот список", callback_data="save_list")
+                )
+            
+            if not force_new and self.list_message_id and self.chat_id:
+                try:
+                    bot_instance.edit_message_text(list_text, self.chat_id, self.list_message_id, reply_markup=markup)
+                    return True
+                except ApiTelegramException as e:
+                    if "message to edit not found" in str(e) or "message is not modified" in str(e):
+                        force_new = True
+                    else:
+                        raise e
+            
+            if force_new:
+                sent_msg = bot_instance.send_message(
+                    message.chat.id,
+                    list_text,
+                    message_thread_id=message.message_thread_id,
+                    reply_markup=markup
+                )
+                self.save_message_info(message.chat.id, sent_msg.message_id)
+                return True
+                
+            return False
+        except Exception as e:
+            print(f"Ошибка обновления списка: {e}")
+            return False
     
     def add_player(self, game_nick: str, tg_nick: str = None) -> bool:
         """Добавляет или обновляет игрока"""
@@ -491,23 +529,77 @@ def update_from_site(message: Message):
         msg = bot.reply_to(message, "🔄 Обновляю список с сайта swgoh.gg. Это займет некоторое время...")
         guild_bot.initialize_from_website()
         
+        # Пытаемся обновить существующее сообщение со списком
+        updated = False
         if guild_bot.list_message_id and guild_bot.chat_id:
             try:
                 new_list_text = guild_bot.format_player_list()
-                bot.edit_message_text(new_list_text, guild_bot.chat_id, guild_bot.list_message_id)
+                markup = None
+                if can_change_roles(message):
+                    markup = InlineKeyboardMarkup()
+                    markup.row(
+                        InlineKeyboardButton("🔄 Обновить с сайта", callback_data="update_from_site"),
+                        InlineKeyboardButton("📝 Сохранить этот список", callback_data="save_list")
+                    )
+                bot.edit_message_text(new_list_text, guild_bot.chat_id, guild_bot.list_message_id, reply_markup=markup)
+                updated = True
                 success_msg = "✅ Список обновлен. Таков путь."
                 bot.edit_message_text(success_msg, message.chat.id, msg.message_id)
-            except Exception as e:
-                print(f"Ошибка обновления списка: {e}")
-                success_msg = "✅ Список обновлен. Используй /list чтобы увидеть."
-                bot.edit_message_text(success_msg, message.chat.id, msg.message_id)
-        else:
+            except ApiTelegramException as e:
+                # Если сообщение не найдено (старый ID), отправляем новое
+                if "message to edit not found" in str(e) or "message is not modified" in str(e):
+                    print(f"Старое сообщение не найдено, отправляем новое: {e}")
+                    new_list_text = guild_bot.format_player_list()
+                    markup = None
+                    if can_change_roles(message):
+                        markup = InlineKeyboardMarkup()
+                        markup.row(
+                            InlineKeyboardButton("🔄 Обновить с сайта", callback_data="update_from_site"),
+                            InlineKeyboardButton("📝 Сохранить этот список", callback_data="save_list")
+                        )
+                    sent_msg = bot.send_message(
+                        message.chat.id,
+                        new_list_text,
+                        message_thread_id=message.message_thread_id,
+                        reply_markup=markup
+                    )
+                    guild_bot.save_message_info(message.chat.id, sent_msg.message_id)
+                    updated = True
+                    success_msg = "✅ Список обновлен и сохранен как новое сообщение."
+                    bot.edit_message_text(success_msg, message.chat.id, msg.message_id)
+                else:
+                    raise e
+        
+        if not updated:
+            # Если нет сохраненного сообщения, отправляем новое
+            new_list_text = guild_bot.format_player_list()
+            markup = None
+            if can_change_roles(message):
+                markup = InlineKeyboardMarkup()
+                markup.row(
+                    InlineKeyboardButton("🔄 Обновить с сайта", callback_data="update_from_site"),
+                    InlineKeyboardButton("📝 Сохранить этот список", callback_data="save_list")
+                )
+            sent_msg = bot.send_message(
+                message.chat.id,
+                new_list_text,
+                message_thread_id=message.message_thread_id,
+                reply_markup=markup
+            )
+            guild_bot.save_message_info(message.chat.id, sent_msg.message_id)
             success_msg = "✅ Список обновлен. Используй /list чтобы увидеть."
-            bot.edit_message_text(success_msg, message.chat.id, msg.message_id)
+            try:
+                bot.edit_message_text(success_msg, message.chat.id, msg.message_id)
+            except:
+                bot.send_message(message.chat.id, success_msg)
+            
     except Exception as e:
         print(f"Ошибка в /update: {e}")
         error_msg = f"❌ Ошибка при обновлении: {str(e)[:100]}"
-        bot.reply_to(message, error_msg)
+        try:
+            bot.edit_message_text(error_msg, message.chat.id, msg.message_id)
+        except:
+            bot.reply_to(message, error_msg)
 
 @bot.message_handler(commands=['add'])
 def add_player_command(message: Message):
@@ -522,16 +614,8 @@ def add_player_command(message: Message):
             tg_nick = match.group(2).strip()
             
             if guild_bot.add_player(game_nick, tg_nick):
-                if guild_bot.list_message_id and guild_bot.chat_id:
-                    try:
-                        new_list_text = guild_bot.format_player_list()
-                        bot.edit_message_text(
-                            new_list_text,
-                            guild_bot.chat_id,
-                            guild_bot.list_message_id
-                        )
-                    except Exception as e:
-                        print(f"Ошибка обновления списка после add: {e}")
+                # Обновляем список
+                guild_bot.update_list_message(bot, message)
                 
                 success_msg = f"✅ Воин {game_nick} добавлен в список. {guild_bot.get_mandalorian_phrase()}"
                 bot.reply_to(message, success_msg)
@@ -567,16 +651,8 @@ def remove_player_command(message: Message):
             return
         
         if guild_bot.remove_player(game_nick):
-            if guild_bot.list_message_id and guild_bot.chat_id:
-                try:
-                    new_list_text = guild_bot.format_player_list()
-                    bot.edit_message_text(
-                        new_list_text,
-                        guild_bot.chat_id,
-                        guild_bot.list_message_id
-                    )
-                except Exception as e:
-                    print(f"Ошибка обновления списка после remove: {e}")
+            # Обновляем список
+            guild_bot.update_list_message(bot, message)
             
             success_msg = f"✅ Воин {game_nick} удален из списка. {guild_bot.get_mandalorian_phrase()}"
             bot.reply_to(message, success_msg)
@@ -634,16 +710,9 @@ def change_role_command(message: Message):
         user_identifier = f"@{message.from_user.username}" if message.from_user.username else "unknown"
         success, result_message = guild_bot.change_role(game_nick, normalized_role, user_identifier)
         
-        if success and guild_bot.list_message_id and guild_bot.chat_id:
-            try:
-                new_list_text = guild_bot.format_player_list()
-                bot.edit_message_text(
-                    new_list_text,
-                    guild_bot.chat_id,
-                    guild_bot.list_message_id
-                )
-            except Exception as e:
-                print(f"Ошибка обновления списка после role: {e}")
+        if success:
+            # Обновляем список
+            guild_bot.update_list_message(bot, message)
         
         bot.reply_to(message, result_message)
         
@@ -671,15 +740,7 @@ def fix_roles_command(message: Message):
         
         if count > 0:
             # Обновляем список
-            if guild_bot.list_message_id and guild_bot.chat_id:
-                try:
-                    bot.edit_message_text(
-                        guild_bot.format_player_list(),
-                        guild_bot.chat_id,
-                        guild_bot.list_message_id
-                    )
-                except Exception as e:
-                    print(f"Ошибка обновления списка: {e}")
+            guild_bot.update_list_message(bot, message)
             
             bot.reply_to(message, f"✅ Исправлено {count} ролей. Теперь Манд'алор будет первым! {guild_bot.get_mandalorian_phrase()}")
             
@@ -713,29 +774,19 @@ def handle_player_add(message: Message):
             tg_nick = match.group(2).strip()
             
             if guild_bot.add_player(game_nick, tg_nick):
-                if guild_bot.list_message_id and guild_bot.chat_id:
-                    try:
-                        new_list_text = guild_bot.format_player_list()
-                        bot.edit_message_text(
-                            new_list_text,
-                            guild_bot.chat_id,
-                            guild_bot.list_message_id
-                        )
-                        reply_msg = f"✅ Воин {game_nick} добавлен в список. {guild_bot.get_mandalorian_phrase()}"
-                        bot.reply_to(message, reply_msg)
-                        
-                        # Отправляем уведомление в канал только если сообщение пришло из канала
-                        if message.chat.id == CHANNEL_CHAT_ID:
-                            bot.send_message(
-                                chat_id=CHANNEL_CHAT_ID,
-                                text=f"➕ {game_nick} присоединился к гильдии! {guild_bot.get_mandalorian_phrase()}",
-                                message_thread_id=message.message_thread_id
-                            )
-                    except Exception as e:
-                        print(f"Ошибка обновления списка: {e}")
-                        bot.reply_to(message, f"✅ Воин добавлен. Используй /list чтобы увидеть список.")
-                else:
-                    bot.reply_to(message, f"✅ Воин добавлен. Используй /list чтобы увидеть список.")
+                # Обновляем список
+                guild_bot.update_list_message(bot, message)
+                
+                reply_msg = f"✅ Воин {game_nick} добавлен в список. {guild_bot.get_mandalorian_phrase()}"
+                bot.reply_to(message, reply_msg)
+                
+                # Отправляем уведомление в канал только если сообщение пришло из канала
+                if message.chat.id == CHANNEL_CHAT_ID:
+                    bot.send_message(
+                        chat_id=CHANNEL_CHAT_ID,
+                        text=f"➕ {game_nick} присоединился к гильдии! {guild_bot.get_mandalorian_phrase()}",
+                        message_thread_id=message.message_thread_id
+                    )
     except Exception as e:
         print(f"Ошибка в handle_player_add: {e}")
 
@@ -765,15 +816,25 @@ def callback_handler(call: CallbackQuery):
                 guild_bot.initialize_from_website()
                 try:
                     new_list_text = guild_bot.format_player_list()
+                    markup = None
+                    if has_rights:
+                        markup = InlineKeyboardMarkup()
+                        markup.row(
+                            InlineKeyboardButton("🔄 Обновить с сайта", callback_data="update_from_site"),
+                            InlineKeyboardButton("📝 Сохранить этот список", callback_data="save_list")
+                        )
                     bot.edit_message_text(
                         new_list_text,
                         call.message.chat.id,
-                        call.message.message_id
+                        call.message.message_id,
+                        reply_markup=markup
                     )
                     bot.send_message(call.message.chat.id, "✅ Список обновлен с сайта. Таков путь.")
-                except Exception as e:
-                    print(f"Ошибка обновления: {e}")
-                    bot.answer_callback_query(call.id, "Ошибка при обновлении", show_alert=True)
+                except ApiTelegramException as e:
+                    if "message is not modified" in str(e):
+                        bot.answer_callback_query(call.id, "Список уже актуален")
+                    else:
+                        raise e
             else:
                 bot.answer_callback_query(call.id, "Ты не достоин этой команды!", show_alert=True)
         
