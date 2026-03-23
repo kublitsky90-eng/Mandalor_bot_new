@@ -6,6 +6,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 from typing import Dict, List, Optional
+import time
 
 # Токен бота
 TOKEN = "8295503667:AAEHfdeLyL158BE1qcRTLCpp0ya5BbzSFe4"
@@ -45,20 +46,82 @@ class GuildBot:
     def parse_swgoh_gg(self) -> List[str]:
         """Парсит список участников с swgoh.gg"""
         try:
-            response = requests.get(GUILD_URL)
+            # Добавляем заголовки User-Agent чтобы имитировать браузер
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            }
+            
+            response = requests.get(GUILD_URL, headers=headers, timeout=10)
+            response.raise_for_status()
+            
             soup = BeautifulSoup(response.text, 'html.parser')
             
-            # Ищем таблицу с участниками
+            # Несколько способов найти имена игроков
             players = []
-            # Адаптируйте селектор под структуру сайта
-            name_elements = soup.select('.player-name a')
             
-            for element in name_elements:
-                name = element.text.strip()
-                if name:
-                    players.append(name)
+            # Способ 1: Поиск по ссылкам на профили игроков
+            # Ищем все ссылки, которые содержат /p/ (путь к профилю игрока)
+            profile_links = soup.find_all('a', href=re.compile(r'/p/\w+/'))
+            
+            for link in profile_links:
+                # Ищем имя игрока в тексте ссылки или в атрибуте
+                player_name = None
+                
+                # Пробуем взять из текста ссылки
+                if link.text.strip():
+                    player_name = link.text.strip()
+                # Или из атрибута data-name если есть
+                elif link.get('data-name'):
+                    player_name = link.get('data-name')
+                # Или из title
+                elif link.get('title'):
+                    player_name = link.get('title')
+                
+                # Очищаем имя от лишних символов
+                if player_name and len(player_name) > 1 and player_name not in players:
+                    # Убираем возможные эмодзи и специальные символы
+                    player_name = re.sub(r'[^\w\s\-]', '', player_name).strip()
+                    if player_name:
+                        players.append(player_name)
+            
+            # Способ 2: Если первый способ не сработал, ищем по таблице
+            if not players:
+                # Ищем таблицу с классом, содержащим "guild" или "member"
+                tables = soup.find_all('table')
+                for table in tables:
+                    rows = table.find_all('tr')
+                    for row in rows:
+                        # Ищем ячейки с именами
+                        cells = row.find_all('td')
+                        for cell in cells:
+                            # Ищем ссылку внутри ячейки
+                            link = cell.find('a')
+                            if link and link.get('href') and '/p/' in link.get('href'):
+                                player_name = link.text.strip()
+                                if player_name and player_name not in players:
+                                    players.append(player_name)
+            
+            # Способ 3: Поиск по конкретному классу на swgoh.gg
+            if not players:
+                # Пробуем найти div с классом guild-members или similar
+                member_elements = soup.select('.member-name, .player-name, .guild-member-name')
+                for element in member_elements:
+                    player_name = element.text.strip()
+                    if player_name and player_name not in players:
+                        players.append(player_name)
+            
+            # Удаляем дубликаты и сортируем
+            players = list(dict.fromkeys(players))
+            
+            print(f"Найдено игроков: {len(players)}")
+            if players:
+                print(f"Первые 5 игроков: {players[:5]}")
             
             return players
+            
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка сети при парсинге: {e}")
+            return []
         except Exception as e:
             print(f"Ошибка при парсинге: {e}")
             return []
@@ -66,13 +129,33 @@ class GuildBot:
     def initialize_from_website(self):
         """Инициализирует список игроков с сайта"""
         website_players = self.parse_swgoh_gg()
+        
+        if not website_players:
+            print("Не удалось получить список с сайта")
+            return False
+        
+        # Обновляем список игроков
+        new_players = {}
         for player in website_players:
-            if player not in self.players:
-                self.players[player] = {
+            if player in self.players:
+                # Сохраняем существующие данные
+                new_players[player] = self.players[player]
+            else:
+                # Добавляем нового игрока
+                new_players[player] = {
                     "tg_nick": None,
                     "role": "Неизвестный воин"
                 }
-        self.save_data()
+        
+        # Проверяем, изменился ли список
+        if set(new_players.keys()) != set(self.players.keys()):
+            self.players = new_players
+            self.save_data()
+            print("Список игроков обновлен")
+            return True
+        else:
+            print("Список игроков не изменился")
+            return False
     
     def format_player_list(self) -> str:
         """Форматирует список игроков для вывода"""
@@ -157,7 +240,9 @@ class GuildBot:
             try:
                 with open(DATA_FILE, 'r', encoding='utf-8') as f:
                     self.players = json.load(f)
-            except:
+                print(f"Загружено игроков: {len(self.players)}")
+            except Exception as e:
+                print(f"Ошибка загрузки данных: {e}")
                 self.players = {}
         else:
             self.players = {}
@@ -180,6 +265,7 @@ class GuildBot:
                     self.list_message_id = int(f.read())
                 with open(CHAT_ID_FILE, 'r') as f:
                     self.chat_id = int(f.read())
+                print(f"Загружена информация о сообщении: chat_id={self.chat_id}, message_id={self.list_message_id}")
             except:
                 self.list_message_id = None
                 self.chat_id = None
@@ -255,21 +341,51 @@ def update_from_site(message: Message):
         bot.reply_to(message, f"Ты не достоин этой команды, воин. {guild_bot.get_mandalorian_phrase()}")
         return
     
-    bot.reply_to(message, "Обновляю список с сайта swgoh.gg. Это займет некоторое время...")
-    guild_bot.initialize_from_website()
+    status_msg = bot.reply_to(message, "🔄 Обновляю список с сайта swgoh.gg. Это займет некоторое время...")
     
-    # Обновляем сообщение со списком если оно есть
-    if guild_bot.list_message_id and guild_bot.chat_id:
-        try:
+    try:
+        # Пытаемся обновить список
+        updated = guild_bot.initialize_from_website()
+        
+        if updated:
+            # Обновляем сообщение со списком если оно есть
+            if guild_bot.list_message_id and guild_bot.chat_id:
+                try:
+                    bot.edit_message_text(
+                        guild_bot.format_player_list(),
+                        guild_bot.chat_id,
+                        guild_bot.list_message_id,
+                        parse_mode="Markdown"
+                    )
+                    bot.edit_message_text(
+                        "✅ Список успешно обновлен с сайта. Таков путь.",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+                except Exception as e:
+                    bot.edit_message_text(
+                        f"✅ Список обновлен, но не удалось обновить сообщение. Используй /list\nОшибка: {e}",
+                        status_msg.chat.id,
+                        status_msg.message_id
+                    )
+            else:
+                bot.edit_message_text(
+                    "✅ Список обновлен. Используй /list чтобы увидеть его.",
+                    status_msg.chat.id,
+                    status_msg.message_id
+                )
+        else:
             bot.edit_message_text(
-                guild_bot.format_player_list(),
-                guild_bot.chat_id,
-                guild_bot.list_message_id,
-                parse_mode="Markdown"
+                "❌ Не удалось получить актуальный список с сайта или список не изменился. Проверьте подключение к интернету и доступность сайта.",
+                status_msg.chat.id,
+                status_msg.message_id
             )
-            bot.send_message(message.chat.id, "Список обновлен. Таков путь.")
-        except:
-            bot.send_message(message.chat.id, "Список обновлен, но не удалось обновить сообщение. Используй /list")
+    except Exception as e:
+        bot.edit_message_text(
+            f"❌ Ошибка при обновлении списка: {e}",
+            status_msg.chat.id,
+            status_msg.message_id
+        )
 
 @bot.message_handler(commands=['role'])
 def change_role(message: Message):
@@ -381,14 +497,23 @@ def callback_handler(call):
     if call.data == "update_from_site":
         if is_admin_or_officer(call.message):
             bot.answer_callback_query(call.id, "Обновляю список с сайта...")
-            guild_bot.initialize_from_website()
-            bot.edit_message_text(
-                guild_bot.format_player_list(),
-                call.message.chat.id,
-                call.message.message_id,
-                parse_mode="Markdown"
-            )
-            bot.send_message(call.message.chat.id, "Список обновлен с сайта. Таков путь.")
+            
+            # Обновляем список
+            updated = guild_bot.initialize_from_website()
+            
+            if updated:
+                try:
+                    bot.edit_message_text(
+                        guild_bot.format_player_list(),
+                        call.message.chat.id,
+                        call.message.message_id,
+                        parse_mode="Markdown"
+                    )
+                    bot.send_message(call.message.chat.id, "✅ Список обновлен с сайта. Таков путь.")
+                except Exception as e:
+                    bot.send_message(call.message.chat.id, f"❌ Ошибка при обновлении списка: {e}")
+            else:
+                bot.send_message(call.message.chat.id, "❌ Не удалось обновить список. Проверьте подключение к интернету.")
         else:
             bot.answer_callback_query(call.id, "Ты не достоин этой команды!", show_alert=True)
     
@@ -398,6 +523,7 @@ def callback_handler(call):
 
 if __name__ == "__main__":
     print("Бот Mandalorians Kryze запущен. Таков путь.")
+    print(f"Загружено игроков: {len(guild_bot.players)}")
     try:
         bot.infinity_polling()
     except Exception as e:
